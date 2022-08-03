@@ -1,0 +1,142 @@
+K8s 1.23 install  
+
+cat /etc/hosts
+10.32.11.23 k8s-master-01
+10.32.11.24 k8s-worker-01
+
+cat  /etc/apt/sources.list
+deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye main contrib non-free
+deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye-updates main contrib non-free
+deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye-backports main contrib non-free
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bullseye-security main contrib non-free
+
+apt-get update
+
+apt-get remove docker docker-engine docker.io
+apt-get install apt-transport-https ca-certificates curl gnupg lsb-release -y
+curl -fsSL https://download.docker.com/linux/debian/gpg |gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+vim /etc/apt/sources.list.d/docker.list 
+deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bullseye stable
+
+
+apt-get update
+apt-get install docker-ce docker-ce-cli containerd.io -y
+systemctl enable docker && systemctl start docker
+ 
+apt-get install make gcc zlib* pcre* libpcre3 libpcre3-dev  libsystemd-dev openssl libssl-dev   ipvsadm
+【批量安装失败了，单独安装】
+
+
+cat > /etc/containerd/config.toml <<EOF
+disabled_plugins = ["restart"]
+
+[plugins.linux]
+shim_debug = true
+
+[plugins.cri.registry.mirrors."docker.io"]
+endpoint = ["https://dbzucv6w.mirror.aliyuncs.com"]
+
+[plugins.cri]
+sandbox_image = "uhub.service.ucloud.cn/uxhy/pause:3.4.1"
+EOF
+ 
+cat > /etc/crictl.yaml <<EOF
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+ 
+systemctl restart containerd
+systemctl enable containerd --now
+systemctl status containerd
+ 
+# Disable the SELinux.   debian 没有这文件，这一步跳过
+#sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+ 
+# Turn off and disable the firewalld. 跳过
+#systemctl stop firewalld
+#systemctl disable firewalld
+ 
+# Modify related kernel parameters & Disable the swap.
+cat > /etc/sysctl.d/k8s.conf << EOF
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.tcp_tw_recycle = 0
+vm.swappiness = 0
+vm.overcommit_memory = 1
+vm.panic_on_oom = 0
+net.ipv6.conf.all.disable_ipv6 = 1
+EOF
+sysctl -p /etc/sysctl.d/k8s.conf >&/dev/null
+swapoff -a
+sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+modprobe br_netfilter
+modprobe overlay
+ 
+# Add ipvs modules
+cat > /etc/sysconfig/modules/ipvs.modules <<EOF
+#!/bin/bash
+modprobe -- ip_vs
+modprobe -- ip_vs_rr
+modprobe -- ip_vs_wrr
+modprobe -- ip_vs_sh
+modprobe -- nf_conntrack
+modprobe -- nf_conntrack
+modprobe -- br_netfilter
+modprobe -- overlay
+EOF
+ 
+chmod 755 /etc/sysconfig/modules/ipvs.modules
+bash /etc/sysconfig/modules/ipvs.modules
+
+
+
+cat kubeadm-config.yaml 
+---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+networking:
+  serviceSubnet: "172.21.0.0/16"
+  podSubnet: "172.20.0.0/16"
+  dnsDomain: "cluster.local"
+kubernetesVersion: "v1.23.0"
+controlPlaneEndpoint: "10.32.11.23:6443"
+apiServer:
+  certSANs:
+  - k8s-master-01
+  - 127.0.0.1
+  - 10.32.11.23
+  timeoutForControlPlane: 4m0s
+certificatesDir: "/etc/kubernetes/pki"
+imageRepository: "k8s.gcr.io"
+
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: ipvs
+
+
+systemctl daemon-reload
+ systemctl restart docker
+
+
+apt-get update && apt-get install -y apt-transport-https
+curl https://mirrors.aliyun.com/kubernetes/apt/doc/apt-key.gpg | apt-key add -
+vim /etc/apt/sources.list.d/kubernetes.list
+deb https://mirrors.aliyun.com/kubernetes/apt/ kubernetes-xenial main
+
+
+apt-get update
+apt-get install kubectl=1.23.0-00 kubelet=1.23.0-00 kubeadm=1.23.0-00 -y
+
+导镜像【自己准备的】
+for i in `ls /opt/images`;do docker load < ${i};done
+
+Master 节点操作：
+kubeadm init --config=kubeadm/kubeadm-config.yaml --upload-certs
+
+
+kubectl apply -f https://github.com/freeityang/calico/blob/main/calico.yaml
